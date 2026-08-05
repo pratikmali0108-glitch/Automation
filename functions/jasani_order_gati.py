@@ -1,4 +1,3 @@
-import os
 import re
 import time
 from pathlib import Path
@@ -11,19 +10,13 @@ from pypdf import PdfReader
 # Global pause setting for UI actions
 pyautogui.PAUSE = 0.5
 
-# Configuration Constants
-TARGET_APP_NAME = "SJE PLUS"             # Application title / search name
-TARGET_PROCESS_NAME = "SJE PLUS.exe"     # Task manager process name
-SEARCH_TEXT = "Jasani Order"             # Menu item to search
+TARGET_APP_NAME = "SJE PLUS"
+TARGET_PROCESS_NAME = "SJE PLUS.exe"
+SEARCH_TEXT = "Jasani Order"
 
 def handle_metal_rate_popup():
-    """
-    Checks if the 'Jasani Order' / Daily Metal Rate dialog box is present
-    and clicks 'No' (or presses 'N') to close it.
-    """
     time.sleep(0.3)
     windows = gw.getWindowsWithTitle("Jasani Order")
-    
     for win in windows:
         if win.visible and win.width < 600:
             print("Detected 'Daily Metal Rate' dialog. Clicking 'No'...")
@@ -34,20 +27,34 @@ def handle_metal_rate_popup():
             return True
     return False
 
-def clean_pdf_text(raw_text):
+def clean_and_extract_style_codes(text):
     """
-    Cleans raw PDF text to handle text wrapped across line breaks.
-    e.g. 'ZR10567H-\nWGGD' or 'ZR10567H\n-WGGD' -> 'ZR10567H-WGGD'
+    Robustly extracts style codes from raw PDF text:
+    1. Handles split styles like 'ZR10567H\nWGGD' or 'ZR10567H-\nWGGD' -> 'ZR10567H-WGGD'
+    2. Finds standard single-line hyphenated style codes (e.g., 'ZR10567H-WGGD')
     """
-    cleaned = re.sub(r'([A-Z0-9]+)-\s*\n\s*([A-Z0-9]+)', r'\1-\2', raw_text, flags=re.IGNORECASE)
-    cleaned = re.sub(r'([A-Z0-9]+)\s*\n\s*-([A-Z0-9]+)', r'\1-\2', cleaned, flags=re.IGNORECASE)
-    return cleaned
+    style_codes = []
+
+    # Pattern 1: Reconnect split style codes across line breaks
+    # Matches alphanumeric strings split by linebreaks where second part is color/metal suffix (e.g. WGGD, YGD, etc.)
+    split_pattern = r'\b([A-Z0-9]{5,12})-?\s*\n\s*([A-Z]{3,6})\b'
+    reconnected = re.sub(split_pattern, r'\1-\2', text)
+
+    # Pattern 2: Match all hyphenated style codes (e.g., ZR10567H-WGGD)
+    matches = re.findall(r'\b[A-Z0-9]{4,12}-[A-Z0-9]{3,8}\b', reconnected)
+    if matches:
+        style_codes.extend(matches)
+
+    # Fallback Pattern 3: If no hyphen existed originally, look for consecutive vendor style block
+    if not style_codes:
+        fallback = re.findall(r'\b([A-Z0-9]{6,10})\s*\n\s*([A-Z]{3,5})\b', text)
+        for part1, part2 in fallback:
+            style_codes.append(f"{part1}-{part2}")
+
+    # Deduplicate while preserving order
+    return list(dict.fromkeys([s.strip() for s in style_codes]))
 
 def extract_pdf_data(pdf_path):
-    """
-    Reads direct text from PDF, normalizes wrapped line-breaks,
-    and extracts PO Number and Vendor Style Codes.
-    """
     print(f"Reading direct text from PDF: {pdf_path}")
     po_number = None
     style_codes = []
@@ -57,13 +64,11 @@ def extract_pdf_data(pdf_path):
         if not reader.pages:
             return None, []
             
-        raw_text = ""
+        full_text = ""
         for page in reader.pages:
-            raw_text += (page.extract_text() or "") + "\n"
-        
-        full_text = clean_pdf_text(raw_text)
+            full_text += (page.extract_text() or "") + "\n"
 
-        # 1. Extract PO Number
+        # Extract PO Number
         po_match = re.search(r'\bPO\s*#\s*([A-Z][0-9]{5,8})\b', full_text)
         if not po_match:
             po_match = re.search(r'\bPO\s*#\s*([\w]+)', full_text)
@@ -72,19 +77,175 @@ def extract_pdf_data(pdf_path):
             po_number = po_match.group(1).strip()
             print(f"Extracted PO #: {po_number}")
 
-        # 2. Extract Vendor Style codes (e.g. ZR10567H-WGGD)
-        styles = re.findall(r'\b[A-Z0-9]{4,12}-[A-Z0-9]{3,8}\b', full_text)
-        if styles:
-            style_codes = list(dict.fromkeys([s.strip() for s in styles]))
-            print(f"Extracted Style Code(s): {style_codes}")
-        else:
-            print("No vendor style codes found matching pattern.")
+        # Extract Style Codes
+        style_codes = clean_and_extract_style_codes(full_text)
+        print(f"Extracted Style Code(s): {style_codes}")
 
         return po_number, style_codes
 
     except Exception as e:
         print(f"Error reading PDF: {e}")
         return None, []
+
+# def open_item_checklist_and_paste_styles(style_codes):
+#     """
+#     1. Clicks the orange checklist icon.
+#     2. Clicks the three dots '...' button to open the Style Code modal.
+#     3. Finds and activates the popup modal to ensure window focus.
+#     4. Clicks directly inside the white text box area.
+#     5. Pastes via clipboard AND types out in real time as a fallback.
+#     6. Hovers and clicks the 'Ok' button.
+#     """
+#     screen_width, screen_height = pyautogui.size()
+
+#     # 1. Click Item Checklist icon (~14.1% X, ~21.8% Y)
+#     checklist_btn_x = int(screen_width * 0.141)
+#     checklist_btn_y = int(screen_height * 0.218)
+
+#     print(f"Clicking Item Checklist icon at ({checklist_btn_x}, {checklist_btn_y})...")
+#     pyautogui.moveTo(checklist_btn_x, checklist_btn_y, duration=0.6, tween=pyautogui.easeInOutQuad)
+#     pyautogui.click()
+#     time.sleep(1.5)
+
+#     handle_metal_rate_popup()
+
+#     # 2. Click three dots '...' button (~9.8% X, ~13.8% Y)
+#     three_dots_x = int(screen_width * 0.098)
+#     three_dots_y = int(screen_height * 0.138)
+
+#     print(f"Clicking three dots '...' button at ({three_dots_x}, {three_dots_y})...")
+#     pyautogui.moveTo(three_dots_x, three_dots_y, duration=0.6, tween=pyautogui.easeInOutQuad)
+#     pyautogui.click()
+#     time.sleep(1.2)
+
+#     # Bring active dialog/popup window to focus
+#     try:
+#         active_wins = gw.getAllWindows()
+#         for w in active_wins:
+#             if w.visible and w.width < 700 and w.height < 700:
+#                 w.activate()
+#                 time.sleep(0.3)
+#                 break
+#     except Exception as e:
+#         print(f"Window activation notice: {e}")
+
+#     # 3. Click dead center inside the white Style Code text box (~49.5% X, ~48.0% Y)
+#     text_box_x = int(screen_width * 0.495)
+#     text_box_y = int(screen_height * 0.480)
+
+#     print(f"Clicking inside Style Code white box at ({text_box_x}, {text_box_y})...")
+#     pyautogui.moveTo(text_box_x, text_box_y, duration=0.5, tween=pyautogui.easeInOutQuad)
+#     pyautogui.click()
+#     time.sleep(0.3)
+
+#     # 4. Input Style Codes
+#     if style_codes:
+#         styles_text = "\n".join(style_codes)
+#         print(f"Target Style Code text: '{styles_text}'")
+
+#         # Clear box
+#         pyautogui.hotkey('ctrl', 'a')
+#         pyautogui.press('backspace')
+#         time.sleep(0.2)
+
+#         # Method A: Clipboard Paste
+#         pyperclip.copy(styles_text)
+#         time.sleep(0.2)
+#         pyautogui.hotkey('ctrl', 'v')
+#         time.sleep(0.4)
+
+#         # Method B: Direct Keystroke Backup (in case Ctrl+V was swallowed)
+#         pyautogui.write(styles_text, interval=0.08)
+#         time.sleep(0.5)
+
+#     # 5. Hover over 'Ok' button inside Style Code dialog (~50.5% X, ~58.2% Y) and click
+#     ok_btn_x = int(screen_width * 0.505)
+#     ok_btn_y = int(screen_height * 0.582)
+
+#     print(f"Hovering to 'Ok' button in Style Code box at ({ok_btn_x}, {ok_btn_y})...")
+#     pyautogui.moveTo(ok_btn_x, ok_btn_y, duration=0.6, tween=pyautogui.easeInOutQuad)
+#     time.sleep(0.3)
+
+#     print("Clicking 'Ok' button...")
+#     pyautogui.click()
+#     time.sleep(1.0)
+
+#     handle_metal_rate_popup()
+
+def open_item_checklist_and_paste_styles(style_codes=None):
+    """
+    Test version: Directly inputs 'ZR10567H-WGGD' in real time.
+    """
+    screen_width, screen_height = pyautogui.size()
+
+    # Hardcoded test value
+    test_style_code = "ZR10567H-WGGD"
+
+    # 1. Click Item Checklist icon (~14.1% X, ~21.8% Y)
+    checklist_btn_x = int(screen_width * 0.141)
+    checklist_btn_y = int(screen_height * 0.218)
+
+    print(f"Clicking Item Checklist icon at ({checklist_btn_x}, {checklist_btn_y})...")
+    pyautogui.moveTo(checklist_btn_x, checklist_btn_y, duration=0.6, tween=pyautogui.easeInOutQuad)
+    pyautogui.click()
+    time.sleep(1.5)
+
+    handle_metal_rate_popup()
+
+    # 2. Click three dots '...' button (~9.8% X, ~13.8% Y)
+    three_dots_x = int(screen_width * 0.098)
+    three_dots_y = int(screen_height * 0.138)
+
+    print(f"Clicking three dots '...' button at ({three_dots_x}, {three_dots_y})...")
+    pyautogui.moveTo(three_dots_x, three_dots_y, duration=0.6, tween=pyautogui.easeInOutQuad)
+    pyautogui.click()
+    time.sleep(1.2)
+
+    # Activate popup window to establish window focus
+    try:
+        active_wins = gw.getAllWindows()
+        for w in active_wins:
+            if w.visible and w.width < 700 and w.height < 700:
+                w.activate()
+                time.sleep(0.3)
+                break
+    except Exception as e:
+        print(f"Window activation notice: {e}")
+
+    # 3. Click directly inside the white Style Code text box (~49.5% X, ~48.0% Y)
+    text_box_x = int(screen_width * 0.495)
+    text_box_y = int(screen_height * 0.480)
+
+    print(f"Clicking inside Style Code text box at ({text_box_x}, {text_box_y})...")
+    pyautogui.moveTo(text_box_x, text_box_y, duration=0.5, tween=pyautogui.easeInOutQuad)
+    pyautogui.click()
+    time.sleep(0.3)
+
+    # 4. Type test code in real time
+    print(f"Typing test style code in real time: '{test_style_code}'")
+    
+    # Clear any pre-existing spaces/text
+    pyautogui.hotkey('ctrl', 'a')
+    pyautogui.press('backspace')
+    time.sleep(0.2)
+
+    # Type key-by-key in real time
+    pyautogui.write(test_style_code, interval=0.08)
+    time.sleep(0.5)
+
+    # 5. Hover over 'Ok' button (~50.5% X, ~58.2% Y) and click
+    ok_btn_x = int(screen_width * 0.505)
+    ok_btn_y = int(screen_height * 0.60)
+
+    print(f"Hovering to 'Ok' button at ({ok_btn_x}, {ok_btn_y})...")
+    pyautogui.moveTo(ok_btn_x, ok_btn_y, duration=0.6, tween=pyautogui.easeInOutQuad)
+    time.sleep(0.3)
+
+    print("Clicking 'Ok' button...")
+    pyautogui.click()
+    time.sleep(1.0)
+
+    handle_metal_rate_popup()
 
 def get_valid_customer_data():
     base_dir = Path(__file__).parent / "customers"
@@ -313,74 +474,7 @@ def process_order_items_section(client_name):
 
     handle_metal_rate_popup()
 
-def open_item_checklist_and_paste_styles(style_codes):
-    """
-    1. Clicks the orange checklist icon.
-    2. Clicks the three dots '...' button to open the Style Code modal.
-    3. Clicks directly inside the Style Code text box to gain focus.
-    4. Pastes the style code(s) via clipboard and fallback typing if needed.
-    5. Hovers over the 'Ok' button and clicks it.
-    """
-    screen_width, screen_height = pyautogui.size()
 
-    # 1. Click Item Checklist icon (~14.1% X, ~21.8% Y)
-    checklist_btn_x = int(screen_width * 0.141)
-    checklist_btn_y = int(screen_height * 0.218)
-
-    print(f"Clicking Item Checklist icon at ({checklist_btn_x}, {checklist_btn_y})...")
-    pyautogui.moveTo(checklist_btn_x, checklist_btn_y, duration=0.6, tween=pyautogui.easeInOutQuad)
-    pyautogui.click()
-    time.sleep(1.5)
-
-    handle_metal_rate_popup()
-
-    # 2. Click three dots '...' button (~9.8% X, ~13.8% Y)
-    three_dots_x = int(screen_width * 0.098)
-    three_dots_y = int(screen_height * 0.138)
-
-    print(f"Clicking three dots '...' button at ({three_dots_x}, {three_dots_y})...")
-    pyautogui.moveTo(three_dots_x, three_dots_y, duration=0.6, tween=pyautogui.easeInOutQuad)
-    pyautogui.click()
-    time.sleep(1.2)
-
-    # 3. Explicitly click inside the Style Code text box (~48.0% X, ~45.0% Y) to focus cursor
-    modal_text_x = int(screen_width * 0.480)
-    modal_text_y = int(screen_height * 0.450)
-
-    print(f"Clicking inside Style Code text box at ({modal_text_x}, {modal_text_y})...")
-    pyautogui.moveTo(modal_text_x, modal_text_y, duration=0.5, tween=pyautogui.easeInOutQuad)
-    pyautogui.click()
-    time.sleep(0.3)
-
-    if style_codes:
-        styles_text = "\n".join(style_codes)
-        print(f"Entering Style Code(s):\n{styles_text}")
-
-        # Primary method: Copy & Paste
-        pyperclip.copy(styles_text)
-        time.sleep(0.2)
-        pyautogui.hotkey('ctrl', 'v')
-        time.sleep(0.4)
-
-        # Fallback safeguard: If clipboard paste yields empty text, type directly
-        pyautogui.hotkey('ctrl', 'a')
-        pyautogui.press('backspace')
-        pyautogui.typewrite(styles_text, interval=0.05)
-        time.sleep(0.4)
-
-    # 4. Hover over 'Ok' button inside the Style Code box (~50.5% X, ~58.2% Y) and click
-    ok_btn_x = int(screen_width * 0.505)
-    ok_btn_y = int(screen_height * 0.582)
-
-    print(f"Hovering to 'Ok' button in Style Code box at ({ok_btn_x}, {ok_btn_y})...")
-    pyautogui.moveTo(ok_btn_x, ok_btn_y, duration=0.6, tween=pyautogui.easeInOutQuad)
-    time.sleep(0.3)
-
-    print("Clicking 'Ok' button...")
-    pyautogui.click()
-    time.sleep(1.0)
-
-    handle_metal_rate_popup()
 
 def main():
     client_name, po_number, style_codes = get_valid_customer_data()
